@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>雨よけ首長人間と蛙</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#071b24;font-family:system-ui,-apple-system,"Yu Gothic",sans-serif}
+  body{cursor:crosshair}
+  canvas{display:block;width:100vw;height:100vh}
+  #start,#gameover{
+    position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 50% 35%,rgba(25,76,76,.42),rgba(3,15,22,.96));
+    color:#e9f4df;text-align:center;z-index:10
+  }
+  .panel{width:min(560px,90vw);padding:34px 30px;border:1px solid rgba(173,211,176,.25);
+    border-radius:24px;background:rgba(6,29,35,.82);box-shadow:0 24px 80px rgba(0,0,0,.45)}
+  h1{margin:0 0 8px;font-size:clamp(28px,5vw,52px);letter-spacing:.08em;font-weight:800}
+  .sub{opacity:.78;margin:0 0 25px}
+  .levels{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  button{border:1px solid rgba(192,220,193,.35);background:#12353a;color:#eaf5df;
+    padding:12px 22px;border-radius:14px;font-size:17px;cursor:pointer;transition:.18s}
+  button:hover{transform:translateY(-2px);background:#1a4848}
+  .hint{font-size:13px;opacity:.62;margin-top:22px;line-height:1.7}
+  #hud{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:5;
+    color:#edf5df;text-shadow:0 3px 16px #000;font-weight:800;letter-spacing:.08em;
+    text-align:center;pointer-events:none}
+  #timer{font-variant-numeric:tabular-nums;font-size:clamp(46px,8vw,86px);line-height:.95}
+  #status{font-size:13px;opacity:.7;margin-top:5px}
+  #levelDisplay{position:fixed;top:22px;left:28px;z-index:5;color:#edf5df;text-shadow:0 3px 16px #000;font-weight:900;font-size:clamp(28px,4vw,50px);letter-spacing:.06em;pointer-events:none}
+  #lives{position:fixed;top:22px;right:28px;z-index:5;color:#edf5df;text-shadow:0 3px 16px #000;font-weight:900;font-size:clamp(24px,3.2vw,42px);letter-spacing:.06em;pointer-events:none}
+  #flash{position:fixed;inset:0;background:#e65b3c;opacity:0;pointer-events:none;z-index:8}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud" class="hidden"><div id="timer">0</div><div id="status">雨よけ中</div></div><div id="levelDisplay" class="hidden">LEVEL 1</div><div id="lives" class="hidden">5/5</div>
+<div id="flash"></div>
+
+<div id="start">
+  <div class="panel">
+    <h1>雨よけの首長人間</h1>
+    <p class="sub">蛙を雨から守れ。首長人間だけをマウスで動かそう。</p>
+    <div class="levels"><button id="startButton">ゲームスタート</button></div>
+    <div class="hint">マウスを動かすと首長人間が移動します。蛙は勝手に逃げます。<br>20秒ごとにLEVELが上がり、LEVEL 8まで進めばクリアです。</div>
+  </div>
+</div>
+
+<div id="gameover" class="hidden">
+  <div class="panel">
+    <h1>雨、降りすぎ。</h1>
+    <p id="result"></p>
+    <button id="retry">もう一度遊ぶ</button>
+  </div>
+</div>
+
+<script>
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const start=document.getElementById('start'),over=document.getElementById('gameover');
+const hud=document.getElementById('hud'),timerEl=document.getElementById('timer'),statusEl=document.getElementById('status'),lives=document.getElementById('lives'),levelDisplay=document.getElementById('levelDisplay');
+const flash=document.getElementById('flash');
+let W,H,dpr,level=1,running=false,last=0,protect=0,score=0,flashUntil=0,gameTime=0,remainingHits=5;
+let mouse={x:innerWidth/2,y:innerHeight*.46}, player={x:mouse.x,y:mouse.y};
+let frog={x:innerWidth/2,y:innerHeight*.78,vx:70,vy:-25,size:1};
+let rain=[],rotation=0,audioCtx=null;
+let humanRise=0;
+const TIMER_BOTTOM=118; // 秒数カウンターの下端付近
+
+// 難易度は20秒ごとに自動上昇。LEVEL 8が最終ステージ。
+function difficulty(){
+  const lv=level;
+  return {
+    // 雨粒を大きくする代わりに、画面に同時に存在する数は大幅に減らす。
+    count:12+(lv-1)*5,
+    speed:165+(lv-1)*55,
+    // LEVELが上がるほど蛙の左右移動速度を少しずつ上げる。
+    frog:55+(lv-1)*13,
+    sudden: lv===1 ? 0 : lv===2 ? .28 : Math.min(2.4,.55+(lv-3)*.30),
+    suddenPower: lv===1 ? 0 : 95+(lv-2)*25
+  };
+}
+const neckHumanImg=new Image(); neckHumanImg.src="data:image/png;base64,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";
+
+const cfg={
+  1:{count:24,speed:170,frog:45},
+  2:{count:38,speed:245,frog:72},
+  3:{count:55,speed:330,frog:105}
+};
+
+function resize(){
+  dpr=Math.min(devicePixelRatio||1,2); W=innerWidth; H=innerHeight;
+  canvas.width=W*dpr; canvas.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+  mouse.x=Math.min(mouse.x,W); mouse.y=Math.min(mouse.y,H);
+}
+addEventListener('resize',resize); resize();
+
+addEventListener('mousemove',e=>{mouse.x=e.clientX;mouse.y=e.clientY});
+document.getElementById('startButton').onclick=()=>startGame();
+document.getElementById('retry').onclick=()=>{over.classList.add('hidden');start.classList.remove('hidden')};
+
+function soundGeko(){
+  try{
+    if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==='suspended') audioCtx.resume();
+    const o=audioCtx.createOscillator(),g=audioCtx.createGain(),o2=audioCtx.createOscillator(),g2=audioCtx.createGain();
+    o.type='square';o.frequency.setValueAtTime(420,audioCtx.currentTime);o.frequency.exponentialRampToValueAtTime(250,audioCtx.currentTime+.13);
+    g.gain.setValueAtTime(.0001,audioCtx.currentTime);g.gain.exponentialRampToValueAtTime(.18,audioCtx.currentTime+.015);g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.16);
+    o.connect(g).connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+.17);
+    o2.type='triangle';o2.frequency.setValueAtTime(170,audioCtx.currentTime+.08);o2.frequency.exponentialRampToValueAtTime(95,audioCtx.currentTime+.25);
+    g2.gain.setValueAtTime(.0001,audioCtx.currentTime+.08);g2.gain.exponentialRampToValueAtTime(.12,audioCtx.currentTime+.1);g2.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.28);
+    o2.connect(g2).connect(audioCtx.destination);o2.start(audioCtx.currentTime+.08);o2.stop(audioCtx.currentTime+.3);
+  }catch(e){}
+}
+
+function startGame(){
+  level=1; running=true; protect=0; score=0; remainingHits=5; rotation=0; rain=[]; gameTime=0; flashUntil=0;
+  player.x=W/2;player.y=H*.43; humanRise=0;
+  const c=difficulty();
+  frog={x:W/2,y:H*.79,vx:(Math.random()-.5)*c.frog*2,vy:(Math.random()-.5)*c.frog*1.5,size:1};
+  for(let i=0;i<c.count;i++) rain.push(makeRain(true));
+  start.classList.add('hidden');over.classList.add('hidden');hud.classList.remove('hidden');lives.classList.remove('hidden');levelDisplay.classList.remove('hidden');lives.textContent='5/5';levelDisplay.textContent='LEVEL 1';
+  last=performance.now(); requestAnimationFrame(loop);
+}
+function makeRain(initial=false){
+  const c=difficulty(),r=14+Math.random()*8;
+  return {x:Math.random()*W,y:initial?Math.random()*H:-20-Math.random()*160,r,seed:Math.random(),vy:c.speed*(.78+Math.random()*.44),sway:(Math.random()-.5)*12,phase:Math.random()*6.28};
+}
+
+function update(dt){
+  gameTime+=dt;
+  level=Math.min(8,Math.floor(gameTime/20)+1);
+  levelDisplay.textContent=`LEVEL ${level}`;
+
+  // LEVEL 8を20秒間守り切ればクリア。
+  if(gameTime>=160){
+    clearGame();
+    return;
+  }
+  const c=difficulty();
+
+  // レベル上昇に合わせて雨粒数を少しずつ増やす。
+  while(rain.length<c.count) rain.push(makeRain());
+  while(rain.length>c.count) rain.pop();
+
+  // 首長人間だけがマウスに追従。蛙は完全に独立して動く。
+  player.x += (mouse.x-player.x)*Math.min(1,dt*10);
+  const desiredY = mouse.y - humanRise;
+  player.y += (desiredY-player.y)*Math.min(1,dt*10);
+  player.x=Math.max(90,Math.min(W-90,player.x));
+  player.y=Math.max(70,Math.min(H*.66-humanRise,player.y));
+  rotation+=dt*(3.2+level*.55);
+
+  // 蛙のランダム移動。Lv.1はゆっくり、Lv.2から急な方向転換が入り、Lv.3以降は頻繁になる。
+  frog.x+=frog.vx*dt; frog.y+=frog.vy*dt;
+  const frogR=38*frog.size;
+  if(frog.x-frogR<10||frog.x+frogR>W-10){
+    frog.vx*=-1; frog.x=Math.max(10+frogR,Math.min(W-10-frogR,frog.x));
+  }
+  if(frog.y-frogR<H*.61||frog.y+frogR>H-10){
+    frog.vy*=-1; frog.y=Math.max(H*.61+frogR,Math.min(H-10-frogR,frog.y));
+  }
+  if(level===1 && Math.random()<dt*.65){
+    frog.vx+=(Math.random()-.5)*c.frog*.7;
+    frog.vy+=(Math.random()-.5)*c.frog*.5;
+  }
+  if(level>=2 && Math.random()<dt*c.sudden){
+    const angle=Math.random()*Math.PI*2;
+    const power=c.suddenPower*(level===2 ? .8 : 1);
+    frog.vx=Math.cos(angle)*power;
+    frog.vy=Math.sin(angle)*power*.75;
+  }
+  const max=c.frog*(level===1?1.35:1.65);
+  frog.vx=Math.max(-max,Math.min(max,frog.vx));
+  frog.vy=Math.max(-max*.75,Math.min(max*.75,frog.vy));
+
+  let hit=false;
+  for(const p of rain){
+    const targetRainSpeed=c.speed*(.78+((p.seed||0)*.44));
+    p.vy += (targetRainSpeed-p.vy)*Math.min(1,dt*3);
+    p.y+=p.vy*dt;
+    p.x+=Math.sin(p.phase+p.y*.015)*p.sway*dt;
+    if(p.y>H+30){Object.assign(p,makeRain());continue}
+
+    // 首長人間に当たった雨は、その場で消える。
+    if(hitsNeckHuman(p.x,p.y,p.r)){
+      p.y=H+80;
+      continue;
+    }
+
+    // 蛙に当たった雨だけが巨大化を発生させる。
+    const frogHitRadius=30*frog.size;
+    if(Math.hypot(p.x-frog.x,p.y-frog.y)<p.r+frogHitRadius){
+      hit=true;
+      p.y=H+80;
+    }
+  }
+
+  if(hit){
+    frog.size*=2;          // 雨に当たるたび倍々に巨大化
+    humanRise += 42;       // 巨大化するたび首長人間も上昇
+    protect=10;            // 被弾から10秒守れば一段階戻る
+    flashUntil=0;
+    score++;
+    remainingHits--;
+    lives.textContent=`${remainingHits}/5`;
+    timerEl.textContent='10';
+    soundGeko();
+
+    // 5回目の被弾でゲームオーバー。
+    if(remainingHits<=0){
+      endGame();
+      return;
+    }
+  }
+
+  if(protect>0){
+    protect-=dt;
+    if(protect<=0){
+      if(frog.size>1){
+        frog.size=Math.max(1,frog.size/2); // 一段階だけ元に戻す
+        humanRise=Math.max(0,humanRise-42);
+      }
+      flashUntil=gameTime+2;             // 蛙の体だけを2秒間ゆっくり朱色に点滅
+      protect=0;
+    }
+    timerEl.textContent=Math.max(0,Math.ceil(protect));
+  }else{
+    timerEl.textContent='0';
+  }
+  statusEl.textContent=`雨よけ中　｜　被弾 ${score}`;
+}
+
+function frogOutOfScreen(){
+  const rx=42*frog.size, ry=48*frog.size;
+  return frog.x-rx<0 || frog.x+rx>W || frog.y-ry<0 || frog.y+ry>H;
+}
+
+function humanNearTimer(){
+  // 首長人間の頭が、画面上部の秒数カウンター付近まで上がったら終了。
+  return player.y - 70 <= TIMER_BOTTOM;
+}
+
+function hitsNeckHuman(x,y,r){
+  // 元イラストの頭・長い首・体をまとめて雨よけ判定にする。
+  // 描画位置：画像左上は (player.x-70, player.y-62)
+  const ox=player.x-70, oy=player.y-62;
+  const pts=[
+    [45,45],[75,30],[105,42],[125,75],       // 頭
+    [145,100],[175,108],[210,100],[245,82],  // 首
+    [275,78],[305,92],[325,112],             // 右側
+    [275,128],[235,125],[200,142],[160,152],
+    [120,150],[95,125],[70,105],[48,85]
+  ];
+  if(pointInPolygon(x,y,pts.map(([px,py])=>[ox+px,oy+py]))) return true;
+  // 回転する頭上のヘリコプター風ブレードも雨よけになる。
+  const hx=player.x+2, hy=player.y-2;
+  const dx=x-hx,dy=y-hy,dist=Math.hypot(dx,dy);
+  if(dist<112){
+    let a=Math.atan2(dy,dx)-rotation;
+    a=(a%(Math.PI*2)+Math.PI*2)%(Math.PI*2);
+    const sector=Math.PI*2/3;
+    const blade=Math.min(a%sector,sector-(a%sector));
+    if(blade<.20) return true;
+  }
+  return false;
+}
+
+function pointInPolygon(x,y,poly){
+  let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const xi=poly[i][0],yi=poly[i][1],xj=poly[j][0],yj=poly[j][1];
+    const intersect=((yi>y)!=(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi);
+    if(intersect) inside=!inside;
+  }
+  return inside;
+}
+
+function endGame(){
+  running=false;
+  hud.classList.add('hidden');
+  lives.classList.add('hidden');
+  levelDisplay.classList.add('hidden');
+  over.classList.remove('hidden');
+  document.getElementById('result').textContent = `蛙に雨が5回当たりました！　被弾 ${score}回`; 
+}
+
+function clearGame(){
+  running=false;
+  hud.classList.add('hidden');
+  lives.classList.add('hidden');
+  levelDisplay.classList.add('hidden');
+  over.classList.remove('hidden');
+  document.getElementById('result').textContent = 'LEVEL 8 CLEAR！　蛙を最後まで雨から守りきりました！';
+}
+
+function triggerFlash(){ /* 蛙の体側で点滅します */ }
+
+function draw(){
+  // night pond
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#071b2b');g.addColorStop(.55,'#0b3340');g.addColorStop(1,'#123f3b');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  // mist
+  ctx.fillStyle='rgba(118,190,157,.06)';
+  for(let i=0;i<7;i++){ctx.beginPath();ctx.ellipse(W*(i/6-.08),H*(.25+i%3*.17),180,35,0,0,Math.PI*2);ctx.fill()}
+  // pond
+  ctx.fillStyle='rgba(14,77,72,.55)';ctx.fillRect(0,H*.58,W,H*.42);
+  // lily pads
+  for(let i=0;i<8;i++){
+    const x=(i*173+80)%W,y=H*(.68+(i%3)*.09);
+    ctx.fillStyle='rgba(47,112,75,.7)';ctx.beginPath();ctx.arc(x,y,18+(i%2)*8,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#123f3b';ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+18,y-4);ctx.lineTo(x+5,y+14);ctx.closePath();ctx.fill();
+  }
+  // rain
+  ctx.lineCap='round';
+  for(const p of rain){
+    ctx.strokeStyle='rgba(167,219,220,.68)';ctx.lineWidth=p.r;
+    ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p.x+p.sway*.06,p.y+p.r*2.6);ctx.stroke();
+  }
+  drawCharacter();
+  drawFrog();
+}
+function drawCharacter(){
+  const x=player.x,y=player.y;
+  // User's original long-neck character: used directly as the rain shield.
+  // The head is the center of the shield; the rest of the body extends behind it.
+  ctx.save();
+  ctx.translate(x,y);
+  const scale=Math.min(1.0, Math.max(.72, W/1100));
+  ctx.globalAlpha=.98;
+  ctx.drawImage(neckHumanImg,-70,-62,337*scale,212*scale);
+  ctx.restore();
+
+  // 白い「人魂」のような3枚羽根。根元は細く、先端ほど太く丸いプロペラ形状。
+  ctx.save();
+  ctx.translate(x,y-2);
+  ctx.rotate(rotation);
+  for(let i=0;i<3;i++){
+    ctx.rotate(Math.PI*2/3);
+    ctx.fillStyle='rgba(245,250,242,.20)';
+    ctx.beginPath();
+    ctx.moveTo(8,-5);
+    ctx.bezierCurveTo(30,-8,62,-15,91,-10);
+    ctx.bezierCurveTo(106,-8,116,0,108,9);
+    ctx.bezierCurveTo(101,19,87,20,78,13);
+    ctx.bezierCurveTo(58,1,34,2,10,5);
+    ctx.quadraticCurveTo(4,0,8,-5);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // 中央の小さな留め具
+  ctx.fillStyle='rgba(235,242,235,.12)';
+  ctx.beginPath();ctx.arc(0,0,8,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+}
+function drawFrog(){
+  const x=frog.x,y=frog.y,s=frog.size;
+  ctx.save();ctx.translate(x,y);ctx.scale(s,s);
+
+  // 10秒経過で縮小した直後だけ、蛙の「体」そのものがゆっくり朱色に点滅。
+  let bodyColor='#3f9a67';
+  if(gameTime<flashUntil){
+    const phase=(flashUntil-gameTime)/2;
+    const pulse=(Math.sin((1-phase)*Math.PI*4)+1)/2;
+    bodyColor=pulse>.5 ? '#e65b3c' : '#3f9a67';
+  }
+
+  ctx.fillStyle=bodyColor;
+  ctx.beginPath();ctx.ellipse(0,12,38,29,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#56ad70';
+  ctx.beginPath();
+  ctx.ellipse(-23,-10,14,14,0,0,Math.PI*2);
+  ctx.ellipse(23,-10,14,14,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#132d24';
+  ctx.beginPath();ctx.arc(-23,-11,5,0,Math.PI*2);ctx.arc(23,-11,5,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='#173b2c';ctx.lineWidth=4;
+  ctx.beginPath();ctx.arc(0,15,19,.15,Math.PI-.15);ctx.stroke();
+  ctx.fillStyle='#6cc07c';
+  ctx.beginPath();ctx.ellipse(-15,38,12,7,-.2,0,Math.PI*2);ctx.ellipse(15,38,12,7,.2,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+}
+function loop(t){
+  if(!running)return;
+  const dt=Math.min(.035,(t-last)/1000);last=t;
+  update(dt);draw();requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
